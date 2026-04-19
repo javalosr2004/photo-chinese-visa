@@ -187,7 +187,7 @@ button:disabled {
 
 .preview-shell {
   position: relative;
-  width: min(100%, 360px);
+  width: min(100%, 420px);
   aspect-ratio: 354 / 472;
   border-radius: 30px;
   overflow: hidden;
@@ -241,6 +241,37 @@ button:disabled {
   position: absolute;
   inset: 0;
   pointer-events: none;
+}
+
+.tracking-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.tracking-box {
+  position: absolute;
+  border: 2px solid rgba(115, 208, 244, 0.95);
+  border-radius: 22px;
+  box-shadow: 0 0 0 1px rgba(8, 12, 16, 0.45) inset;
+}
+
+.tracking-point {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  margin-top: -7px;
+}
+
+.tracking-point span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 171, 91, 0.95);
+  background: rgba(255, 244, 225, 0.94);
+  box-shadow: 0 0 0 2px rgba(16, 18, 20, 0.48);
 }
 
 .frame-mask {

@@ -1,11 +1,21 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { GuideFrame } from './components/GuideFrame';
+import { TrackingOverlay } from './components/TrackingOverlay';
 import { ValidationList } from './components/ValidationList';
 import {
   captureFrameFromVideo,
   exportPhoto,
   loadImageSourceFromFile,
 } from './lib/exportPhoto';
+import {
+  assessFaceTracking,
+  createNoFaceAssessment,
+  createTrackingLoadingAssessment,
+  detectFaceInImage,
+  detectFaceInVideo,
+  type FaceTrackingAssessment,
+  type RawFaceTrackingResult,
+} from './lib/faceTracking';
 import { removePhotoBackground } from './lib/backgroundRemoval';
 import { clampCropToViewport, getRenderedImageMetrics } from './lib/imageMath';
 import { chinaVisaPhotoSpec } from './spec';
@@ -37,12 +47,18 @@ function App() {
   const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number } | null>(null);
   const [cameraError, setCameraError] = useState<string>('');
   const [cameraReady, setCameraReady] = useState(false);
+  const [cameraFrameSize, setCameraFrameSize] = useState<{ width: number; height: number } | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [isRemovingBackground, setIsRemovingBackground] = useState(false);
   const [backgroundRemovalMessage, setBackgroundRemovalMessage] = useState('');
   const [exportResult, setExportResult] = useState<ExportResult | null>(null);
+  const [rawCameraTracking, setRawCameraTracking] = useState<RawFaceTrackingResult | null>(null);
+  const [rawImageTracking, setRawImageTracking] = useState<RawFaceTrackingResult | null>(null);
+  const [trackingLoading, setTrackingLoading] = useState(false);
+  const [trackingError, setTrackingError] = useState('');
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const previewImageRef = useRef<HTMLImageElement | null>(null);
   const originalImageUrlRef = useRef<string | null>(null);
   const processedImageUrlRef = useRef<string | null>(null);
   const exportUrlRef = useRef<string | null>(null);
@@ -56,6 +72,23 @@ function App() {
 
     return getRenderedImageMetrics(imageSource, viewportWidth, viewportHeight, crop);
   }, [crop, imageSource]);
+  const cameraPreviewMetrics = useMemo(() => {
+    if (!cameraFrameSize) {
+      return null;
+    }
+
+    return getRenderedImageMetrics(
+      {
+        src: '',
+        width: cameraFrameSize.width,
+        height: cameraFrameSize.height,
+        filename: 'camera-frame',
+      },
+      viewportWidth,
+      viewportHeight,
+      initialCrop,
+    );
+  }, [cameraFrameSize]);
 
   useEffect(() => {
     if (sourceMode === 'camera' && stage === 'acquire') {
@@ -96,21 +129,186 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (stage !== 'acquire' || sourceMode !== 'camera' || !cameraReady) {
+      setRawCameraTracking(null);
+      return;
+    }
+
+    let cancelled = false;
+    let pending = false;
+
+    setTrackingLoading(true);
+    setTrackingError('');
+
+    const intervalId = window.setInterval(() => {
+      if (pending || cancelled || !videoRef.current || videoRef.current.videoWidth === 0) {
+        return;
+      }
+
+      pending = true;
+      void detectFaceInVideo(videoRef.current, performance.now())
+        .then((result) => {
+          if (!cancelled) {
+            setRawCameraTracking(result);
+            setTrackingError('');
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setTrackingError(
+              error instanceof Error
+                ? `Face tracking unavailable: ${error.message}`
+                : 'Face tracking unavailable.',
+            );
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setTrackingLoading(false);
+          }
+          pending = false;
+        });
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [cameraReady, sourceMode, stage]);
+
+  useEffect(() => {
+    if (!imageSource || !previewImageRef.current) {
+      setRawImageTracking(null);
+      return;
+    }
+
+    const imageElement = previewImageRef.current;
+    let cancelled = false;
+
+    async function analyzeImage() {
+      setTrackingLoading(true);
+      setTrackingError('');
+
+      try {
+        const result = await detectFaceInImage(imageElement);
+        if (!cancelled) {
+          setRawImageTracking(result);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setTrackingError(
+            error instanceof Error
+              ? `Face tracking unavailable: ${error.message}`
+              : 'Face tracking unavailable.',
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setTrackingLoading(false);
+        }
+      }
+    }
+
+    if (imageElement.complete) {
+      void analyzeImage();
+    } else {
+      imageElement.onload = () => {
+        void analyzeImage();
+      };
+    }
+
+    return () => {
+      cancelled = true;
+      imageElement.onload = null;
+    };
+  }, [imageSource]);
+
+  const cameraTrackingAssessment = useMemo<FaceTrackingAssessment | null>(() => {
+    if (trackingError && sourceMode === 'camera' && stage === 'acquire') {
+      return createNoFaceAssessment(trackingError);
+    }
+
+    if (sourceMode !== 'camera' || stage !== 'acquire') {
+      return null;
+    }
+
+    if (trackingLoading && !rawCameraTracking) {
+      return createTrackingLoadingAssessment(
+        'Loading AI framing assist. Ear and face guidance will appear after the model initializes.',
+      );
+    }
+
+    if (!rawCameraTracking || !cameraPreviewMetrics) {
+      return createNoFaceAssessment(
+        'No face detected yet. Center your face and keep both ears visible to activate framing guidance.',
+      );
+    }
+
+    return assessFaceTracking(
+      rawCameraTracking,
+      cameraPreviewMetrics,
+      viewportWidth,
+      viewportHeight,
+      chinaVisaPhotoSpec.guide,
+      { mirrorX: true },
+    );
+  }, [cameraPreviewMetrics, rawCameraTracking, sourceMode, stage, trackingError, trackingLoading]);
+
+  const imageTrackingAssessment = useMemo<FaceTrackingAssessment | null>(() => {
+    if (!imageSource || !previewMetrics) {
+      return null;
+    }
+
+    if (trackingError && stage === 'adjust') {
+      return createNoFaceAssessment(trackingError);
+    }
+
+    if (trackingLoading && !rawImageTracking) {
+      return createTrackingLoadingAssessment(
+        'Analyzing face and ear position in the selected photo.',
+      );
+    }
+
+    if (!rawImageTracking) {
+      return createNoFaceAssessment(
+        'No face detected in this photo. Try a clearer front-facing portrait or adjust the crop.',
+      );
+    }
+
+    return assessFaceTracking(
+      rawImageTracking,
+      previewMetrics,
+      viewportWidth,
+      viewportHeight,
+      chinaVisaPhotoSpec.guide,
+    );
+  }, [imageSource, previewMetrics, rawImageTracking, stage, trackingError, trackingLoading]);
+
   const liveGuideValidations = useMemo<ValidationResult[]>(() => {
+    const manualReview: ValidationResult = {
+      status: 'warn',
+      code: 'manual-review',
+      message:
+        'Expression, glare, hair obstruction, and exact ear-edge coverage still need a manual visual check.',
+    };
+
+    if (sourceMode === 'camera' && stage === 'acquire') {
+      return [
+        ...(cameraTrackingAssessment?.validations ?? []),
+        manualReview,
+      ];
+    }
+
     if (!imageSource) {
       return [
         {
           status: 'warn',
           code: 'manual-framing',
           message:
-            'Align the crown to the top band, keep the face centered, and size the head to fill about 70% of the frame height.',
+            'Capture or upload a portrait, then the app will analyze the face box and ear landmarks.',
         },
-        {
-          status: 'warn',
-          code: 'manual-eyes',
-          message:
-            'This tool does not detect facial landmarks. Confirm ears, expression, and eye visibility yourself before export.',
-        },
+        manualReview,
       ];
     }
 
@@ -127,27 +325,15 @@ function App() {
           ? 'Background removal is active. Export will flatten the portrait onto a solid white background.'
           : 'Background removal is optional. Use it if the original background is not clean white.',
       },
-      {
-        status: crop.scale < 1.05 ? 'warn' : 'pass',
-        code: 'head-scale',
-        message:
-          crop.scale < 1.05
-            ? 'Subject may be too small. Increase zoom until the head roughly fills the guide silhouette.'
-            : 'Zoom level is closer to the recommended head coverage range.',
-      },
-      {
-        status: Math.abs(crop.offsetY) > 42 ? 'warn' : 'pass',
-        code: 'vertical-position',
-        message:
-          Math.abs(crop.offsetY) > 42
-            ? 'Subject may be sitting too high or too low relative to the top and chin guides.'
-            : 'Vertical alignment stays near the intended crown and chin guide bands.',
-      },
+      ...(imageTrackingAssessment?.validations ?? []),
+      manualReview,
     ];
-  }, [crop, imageSource, processedImageSource]);
+  }, [cameraTrackingAssessment, imageSource, imageTrackingAssessment, processedImageSource, sourceMode, stage]);
 
   async function startCamera() {
     setCameraError('');
+    setTrackingError('');
+    setRawCameraTracking(null);
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraError('Camera capture is not available in this browser.');
@@ -171,6 +357,10 @@ function App() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
+        setCameraFrameSize({
+          width: videoRef.current.videoWidth,
+          height: videoRef.current.videoHeight,
+        });
         setCameraReady(true);
       }
     } catch (error) {
@@ -188,6 +378,7 @@ function App() {
     }
 
     setCameraReady(false);
+    setCameraFrameSize(null);
   }
 
   async function handleCapture() {
@@ -281,6 +472,8 @@ function App() {
     setStage('acquire');
     setCrop(initialCrop);
     setBackgroundRemovalMessage('');
+    setTrackingError('');
+    setRawImageTracking(null);
     clearExportResult();
     clearProcessedImageSource();
     clearOriginalImageSource();
@@ -391,8 +584,8 @@ function App() {
           <h1>Frame it cleanly. Export it within spec.</h1>
           <p className="hero-copy">
             This tool guides the shot, helps you center and size the portrait, and exports a
-            JPEG at 420 x 560 with file-size tuning. It does not guarantee acceptance, does not
-            use face detection, and only removes backgrounds when you explicitly ask for it.
+            JPEG at 420 x 560 with file-size tuning. It now uses live face-box and ear landmark
+            tracking for practical framing guidance, but it still does not guarantee acceptance.
           </p>
         </div>
         <div className="spec-card">
@@ -441,6 +634,7 @@ function App() {
                   onLoadedData={() => setCameraReady(true)}
                 />
                 <GuideFrame modeLabel="Live framing guide" />
+                <TrackingOverlay overlay={cameraTrackingAssessment?.overlay ?? null} />
               </div>
               {cameraError ? <p className="error-text">{cameraError}</p> : null}
               <div className="button-row">
@@ -494,6 +688,7 @@ function App() {
             <div className="preview-white-base" />
             {imageSource ? (
               <img
+                ref={previewImageRef}
                 src={imageSource.src}
                 alt="Selected source"
                 className="media-preview"
@@ -512,6 +707,7 @@ function App() {
               </div>
             )}
             <GuideFrame subtle={stage === 'export'} modeLabel="Target silhouette" />
+            <TrackingOverlay overlay={imageTrackingAssessment?.overlay ?? null} />
           </div>
 
           <div className="slider-group">
@@ -547,8 +743,8 @@ function App() {
           </div>
 
           <p className="helper-text">
-            Background removal is optional. It runs locally in the browser and may take longer on
-            the first use while model files download.
+            AI framing assist checks a face box and approximate ear landmarks. It is guidance, not
+            a guarantee of embassy acceptance.
           </p>
           {backgroundRemovalMessage ? (
             <p className="helper-text helper-text-status">{backgroundRemovalMessage}</p>
@@ -567,7 +763,7 @@ function App() {
           </div>
         </section>
 
-        <ValidationList title="Live guide status" validations={liveGuideValidations} />
+        <ValidationList title="AI framing assist" validations={liveGuideValidations} />
 
         <section className="panel export-panel">
           <div className="panel-heading">

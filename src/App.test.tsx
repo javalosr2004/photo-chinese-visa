@@ -14,7 +14,7 @@ describe('App', () => {
   it('shows framing guidance warnings before a photo is loaded', () => {
     render(<App />);
 
-    expect(screen.getByText(/Align the crown to the top band/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Keep crown in this band/i).length).toBeGreaterThan(0);
   });
 
   it('disables export until a source image exists', () => {
@@ -27,7 +27,7 @@ describe('App', () => {
     render(<App />);
 
     expect(screen.getByRole('button', { name: /Remove background to white/i })).toBeDisabled();
-    expect(screen.getByText(/Background removal is optional/i)).toBeInTheDocument();
+    expect(screen.getByText(/AI framing assist checks a face box and approximate ear landmarks/i)).toBeInTheDocument();
   });
 
   it('renders upload input in upload mode', () => {
