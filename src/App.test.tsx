@@ -20,7 +20,14 @@ describe('App', () => {
   it('disables export until a source image exists', () => {
     render(<App />);
 
-    expect(screen.getByRole('button', { name: /Export 420 × 560 JPEG/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Export 420 x 560 JPEG/i })).toBeDisabled();
+  });
+
+  it('renders optional background removal controls', () => {
+    render(<App />);
+
+    expect(screen.getByRole('button', { name: /Remove background to white/i })).toBeDisabled();
+    expect(screen.getByText(/Background removal is optional/i)).toBeInTheDocument();
   });
 
   it('renders upload input in upload mode', () => {

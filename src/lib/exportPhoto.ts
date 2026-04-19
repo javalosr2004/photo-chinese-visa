@@ -138,14 +138,21 @@ export async function exportPhoto({
 }
 
 export async function loadImageSourceFromFile(file: File): Promise<ImageSource> {
-  const src = URL.createObjectURL(file);
+  return loadImageSourceFromBlob(file, file.name);
+}
+
+export async function loadImageSourceFromBlob(
+  blob: Blob,
+  filename: string,
+): Promise<ImageSource> {
+  const src = URL.createObjectURL(blob);
   const image = await loadHtmlImage(src);
 
   return {
     src,
     width: image.naturalWidth,
     height: image.naturalHeight,
-    filename: file.name,
+    filename,
   };
 }
 

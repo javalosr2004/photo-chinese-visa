@@ -39,15 +39,13 @@ export function clampCropToViewport(
     viewportHeight,
     crop,
   );
-  const minOffsetX = viewportWidth - metrics.drawnWidth - (viewportWidth - metrics.drawnWidth) / 2;
-  const maxOffsetX = (metrics.drawnWidth - viewportWidth) / 2;
-  const minOffsetY = viewportHeight - metrics.drawnHeight - (viewportHeight - metrics.drawnHeight) / 2;
-  const maxOffsetY = (metrics.drawnHeight - viewportHeight) / 2;
+  const maxOffsetX = Math.max(0, (metrics.drawnWidth - viewportWidth) / 2);
+  const maxOffsetY = Math.max(0, (metrics.drawnHeight - viewportHeight) / 2);
 
   return {
     ...crop,
-    offsetX: clamp(crop.offsetX, minOffsetX, maxOffsetX),
-    offsetY: clamp(crop.offsetY, minOffsetY, maxOffsetY),
+    offsetX: clamp(crop.offsetX, -maxOffsetX, maxOffsetX),
+    offsetY: clamp(crop.offsetY, -maxOffsetY, maxOffsetY),
   };
 }
 

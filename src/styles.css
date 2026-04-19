@@ -195,6 +195,7 @@ button:disabled {
     linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.01)),
     #121518;
   border: 1px solid rgba(255, 255, 255, 0.1);
+  touch-action: none;
 }
 
 .preview-shell.dragging {
@@ -207,12 +208,20 @@ button:disabled {
 
 .media-preview {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  max-width: none;
   touch-action: none;
   user-select: none;
+  pointer-events: none;
+}
+
+.media-preview-mirrored {
+  transform: scaleX(-1);
+}
+
+.preview-white-base {
+  position: absolute;
+  inset: 0;
+  background: #ffffff;
 }
 
 .empty-preview,
@@ -423,6 +432,16 @@ button:disabled {
 .error-text {
   color: #ffb2a8;
   margin: 0 0 0.75rem;
+}
+
+.helper-text {
+  margin: 0.7rem 0 0;
+  color: rgba(247, 242, 232, 0.72);
+  font-size: 0.94rem;
+}
+
+.helper-text-status {
+  color: var(--secondary);
 }
 
 input[type="file"] {

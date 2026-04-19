@@ -1,8 +1,13 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { GuideFrame } from './components/GuideFrame';
 import { ValidationList } from './components/ValidationList';
-import { exportPhoto, captureFrameFromVideo, loadImageSourceFromFile } from './lib/exportPhoto';
-import { clampCropToViewport } from './lib/imageMath';
+import {
+  captureFrameFromVideo,
+  exportPhoto,
+  loadImageSourceFromFile,
+} from './lib/exportPhoto';
+import { removePhotoBackground } from './lib/backgroundRemoval';
+import { clampCropToViewport, getRenderedImageMetrics } from './lib/imageMath';
 import { chinaVisaPhotoSpec } from './spec';
 import { formatKilobytes } from './lib/validators';
 import type {
@@ -25,20 +30,32 @@ const initialCrop: CropState = {
 function App() {
   const [stage, setStage] = useState<Stage>('acquire');
   const [sourceMode, setSourceMode] = useState<SourceMode>('camera');
-  const [imageSource, setImageSource] = useState<ImageSource | null>(null);
+  const [originalImageSource, setOriginalImageSource] = useState<ImageSource | null>(null);
+  const [processedImageSource, setProcessedImageSource] = useState<ImageSource | null>(null);
   const [crop, setCrop] = useState<CropState>(initialCrop);
   const [dragging, setDragging] = useState(false);
   const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number } | null>(null);
   const [cameraError, setCameraError] = useState<string>('');
   const [cameraReady, setCameraReady] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isRemovingBackground, setIsRemovingBackground] = useState(false);
+  const [backgroundRemovalMessage, setBackgroundRemovalMessage] = useState('');
   const [exportResult, setExportResult] = useState<ExportResult | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const imageUrlRef = useRef<string | null>(null);
+  const originalImageUrlRef = useRef<string | null>(null);
+  const processedImageUrlRef = useRef<string | null>(null);
   const exportUrlRef = useRef<string | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const imageSource = processedImageSource ?? originalImageSource;
+  const previewMetrics = useMemo(() => {
+    if (!imageSource) {
+      return null;
+    }
+
+    return getRenderedImageMetrics(imageSource, viewportWidth, viewportHeight, crop);
+  }, [crop, imageSource]);
 
   useEffect(() => {
     if (sourceMode === 'camera' && stage === 'acquire') {
@@ -53,8 +70,12 @@ function App() {
   }, [sourceMode, stage]);
 
   useEffect(() => {
-    imageUrlRef.current = imageSource?.src ?? null;
-  }, [imageSource]);
+    originalImageUrlRef.current = originalImageSource?.src ?? null;
+  }, [originalImageSource]);
+
+  useEffect(() => {
+    processedImageUrlRef.current = processedImageSource?.src ?? null;
+  }, [processedImageSource]);
 
   useEffect(() => {
     exportUrlRef.current = exportResult?.objectUrl ?? null;
@@ -63,8 +84,11 @@ function App() {
   useEffect(() => {
     return () => {
       stopCamera();
-      if (imageUrlRef.current?.startsWith('blob:')) {
-        URL.revokeObjectURL(imageUrlRef.current);
+      if (originalImageUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(originalImageUrlRef.current);
+      }
+      if (processedImageUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(processedImageUrlRef.current);
       }
       if (exportUrlRef.current) {
         URL.revokeObjectURL(exportUrlRef.current);
@@ -97,6 +121,13 @@ function App() {
         message: 'Photo loaded. Drag to center the face and use zoom to match the head zone.',
       },
       {
+        status: processedImageSource ? 'pass' : 'warn',
+        code: 'background-option',
+        message: processedImageSource
+          ? 'Background removal is active. Export will flatten the portrait onto a solid white background.'
+          : 'Background removal is optional. Use it if the original background is not clean white.',
+      },
+      {
         status: crop.scale < 1.05 ? 'warn' : 'pass',
         code: 'head-scale',
         message:
@@ -113,7 +144,7 @@ function App() {
             : 'Vertical alignment stays near the intended crown and chin guide bands.',
       },
     ];
-  }, [crop, imageSource]);
+  }, [crop, imageSource, processedImageSource]);
 
   async function startCamera() {
     setCameraError('');
@@ -155,6 +186,7 @@ function App() {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+
     setCameraReady(false);
   }
 
@@ -164,10 +196,12 @@ function App() {
     }
 
     const nextImage = await captureFrameFromVideo(videoRef.current);
-    replaceImageSource(nextImage);
+    replaceOriginalImageSource(nextImage);
+    clearProcessedImageSource();
+    clearExportResult();
+    setBackgroundRemovalMessage('');
     setCrop(initialCrop);
     setStage('adjust');
-    clearExportResult();
     stopCamera();
   }
 
@@ -178,10 +212,48 @@ function App() {
     }
 
     const nextImage = await loadImageSourceFromFile(file);
-    replaceImageSource(nextImage);
+    replaceOriginalImageSource(nextImage);
+    clearProcessedImageSource();
+    clearExportResult();
+    setBackgroundRemovalMessage('');
     setCrop(initialCrop);
     setStage('adjust');
+  }
+
+  async function handleRemoveBackground() {
+    if (!imageSource || isRemovingBackground) {
+      return;
+    }
+
+    setIsRemovingBackground(true);
+    setBackgroundRemovalMessage(
+      'Removing background. The first run may take longer while the model downloads.',
+    );
     clearExportResult();
+
+    try {
+      const nextImage = await removePhotoBackground(imageSource, ({ label, current, total }) => {
+        const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+        setBackgroundRemovalMessage(`Downloading ${label}... ${percent}%`);
+      });
+
+      replaceProcessedImageSource(nextImage);
+      setBackgroundRemovalMessage('Background removed. Export will render it onto pure white.');
+    } catch (error) {
+      setBackgroundRemovalMessage(
+        error instanceof Error
+          ? `Background removal failed: ${error.message}`
+          : 'Background removal failed. Try again with a clearer portrait photo.',
+      );
+    } finally {
+      setIsRemovingBackground(false);
+    }
+  }
+
+  function handleRestoreOriginal() {
+    clearProcessedImageSource();
+    clearExportResult();
+    setBackgroundRemovalMessage('Restored the original photo.');
   }
 
   async function handleExport() {
@@ -208,14 +280,17 @@ function App() {
     setSourceMode(nextMode);
     setStage('acquire');
     setCrop(initialCrop);
+    setBackgroundRemovalMessage('');
     clearExportResult();
-    clearImageSource();
+    clearProcessedImageSource();
+    clearOriginalImageSource();
   }
 
   function beginDrag(clientX: number, clientY: number) {
-    if (!imageSource) {
+    if (!imageSource || isRemovingBackground) {
       return;
     }
+
     setDragging(true);
     setDragOrigin({ x: clientX, y: clientY });
   }
@@ -254,8 +329,8 @@ function App() {
     setCrop(nextCrop);
   }
 
-  function clearImageSource() {
-    setImageSource((current) => {
+  function clearOriginalImageSource() {
+    setOriginalImageSource((current) => {
       if (current?.src.startsWith('blob:')) {
         URL.revokeObjectURL(current.src);
       }
@@ -263,8 +338,26 @@ function App() {
     });
   }
 
-  function replaceImageSource(nextImage: ImageSource) {
-    setImageSource((current) => {
+  function replaceOriginalImageSource(nextImage: ImageSource) {
+    setOriginalImageSource((current) => {
+      if (current?.src.startsWith('blob:')) {
+        URL.revokeObjectURL(current.src);
+      }
+      return nextImage;
+    });
+  }
+
+  function clearProcessedImageSource() {
+    setProcessedImageSource((current) => {
+      if (current?.src.startsWith('blob:')) {
+        URL.revokeObjectURL(current.src);
+      }
+      return null;
+    });
+  }
+
+  function replaceProcessedImageSource(nextImage: ImageSource) {
+    setProcessedImageSource((current) => {
       if (current?.src.startsWith('blob:')) {
         URL.revokeObjectURL(current.src);
       }
@@ -298,14 +391,14 @@ function App() {
           <h1>Frame it cleanly. Export it within spec.</h1>
           <p className="hero-copy">
             This tool guides the shot, helps you center and size the portrait, and exports a
-            JPEG at 420 × 560 with file-size tuning. It does not guarantee acceptance and does
-            not use face detection.
+            JPEG at 420 x 560 with file-size tuning. It does not guarantee acceptance, does not
+            use face detection, and only removes backgrounds when you explicitly ask for it.
           </p>
         </div>
         <div className="spec-card">
           <p>Official digital target</p>
-          <strong>420 × 560 JPEG</strong>
-          <span>Accepted digital sizes: 354 × 472 or 420 × 560</span>
+          <strong>420 x 560 JPEG</strong>
+          <span>Accepted digital sizes: 354 x 472 or 420 x 560</span>
           <span>Preferred file size: 40 KB to 120 KB</span>
         </div>
       </div>
@@ -343,7 +436,7 @@ function App() {
                   ref={videoRef}
                   playsInline
                   muted
-                  className="media-preview"
+                  className="media-preview media-preview-mirrored"
                   aria-label="Live camera preview"
                   onLoadedData={() => setCameraReady(true)}
                 />
@@ -354,10 +447,7 @@ function App() {
                 <button onClick={() => void startCamera()} className="secondary-button">
                   Refresh camera
                 </button>
-                <button
-                  onClick={() => void handleCapture()}
-                  disabled={!cameraReady}
-                >
+                <button onClick={() => void handleCapture()} disabled={!cameraReady}>
                   Capture photo
                 </button>
               </div>
@@ -370,7 +460,6 @@ function App() {
               </p>
               <label htmlFor="upload-photo">Choose a photo</label>
               <input
-                ref={fileInputRef}
                 id="upload-photo"
                 type="file"
                 accept="image/*"
@@ -402,13 +491,18 @@ function App() {
             }}
             onTouchEnd={endDrag}
           >
+            <div className="preview-white-base" />
             {imageSource ? (
               <img
                 src={imageSource.src}
                 alt="Selected source"
                 className="media-preview"
+                draggable={false}
                 style={{
-                  transform: `translate(${crop.offsetX}px, ${crop.offsetY}px) scale(${crop.scale})`,
+                  left: `${previewMetrics?.originX ?? 0}px`,
+                  top: `${previewMetrics?.originY ?? 0}px`,
+                  width: `${previewMetrics?.drawnWidth ?? viewportWidth}px`,
+                  height: `${previewMetrics?.drawnHeight ?? viewportHeight}px`,
                 }}
               />
             ) : (
@@ -430,23 +524,45 @@ function App() {
               step="0.01"
               value={crop.scale}
               onChange={(event) => handleZoomChange(Number(event.target.value))}
-              disabled={!imageSource}
+              disabled={!imageSource || isRemovingBackground}
             />
-            <span>{crop.scale.toFixed(2)}×</span>
+            <span>{crop.scale.toFixed(2)}x</span>
           </div>
 
           <div className="button-row">
             <button
               className="secondary-button"
-              onClick={() => resetToAcquire(sourceMode)}
+              onClick={() => void handleRemoveBackground()}
+              disabled={!imageSource || isRemovingBackground}
             >
+              {isRemovingBackground ? 'Removing background...' : 'Remove background to white'}
+            </button>
+            <button
+              className="secondary-button"
+              onClick={handleRestoreOriginal}
+              disabled={!processedImageSource || isRemovingBackground}
+            >
+              Restore original
+            </button>
+          </div>
+
+          <p className="helper-text">
+            Background removal is optional. It runs locally in the browser and may take longer on
+            the first use while model files download.
+          </p>
+          {backgroundRemovalMessage ? (
+            <p className="helper-text helper-text-status">{backgroundRemovalMessage}</p>
+          ) : null}
+
+          <div className="button-row">
+            <button className="secondary-button" onClick={() => resetToAcquire(sourceMode)}>
               Start over
             </button>
             <button
               onClick={() => void handleExport()}
-              disabled={!imageSource || isExporting}
+              disabled={!imageSource || isExporting || isRemovingBackground}
             >
-              {isExporting ? 'Exporting…' : 'Export 420 × 560 JPEG'}
+              {isExporting ? 'Exporting...' : 'Export 420 x 560 JPEG'}
             </button>
           </div>
         </section>
@@ -467,7 +583,9 @@ function App() {
                   alt="Exported China visa photo"
                   className="export-preview"
                 />
-                <p>{exportResult.width} × {exportResult.height}</p>
+                <p>
+                  {exportResult.width} x {exportResult.height}
+                </p>
                 <p>{formatKilobytes(exportResult.fileSize)}</p>
                 <p>JPEG quality {exportResult.jpegQuality.toFixed(2)}</p>
                 <a
